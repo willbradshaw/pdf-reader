@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+# Import libraries
 import argparse
 import pypdf
 import requests
@@ -14,96 +15,99 @@ from functools import partial
 # Set OpenAI API key
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 
-# Set maximum number of tokens for OpenAI API calls
-model_max_tokens = {"gpt-3.5-turbo":4096,"gpt-4":8192}
-model_chunk_tokens_base = {"gpt-3.5-turbo":math.ceil(4096/3),"gpt-4":math.ceil(8192/3)}
-model_chunk_tokens_overlap = {"gpt-3.5-turbo":math.ceil(4096/30),"gpt-4":math.ceil(8192/30)}
+#==============================================================================
+# Define model class
+#==============================================================================
 
-# PDF to Text
-def pdf_to_text(file_path, verbose=False):
-    with open(file_path, 'rb') as file:
-        pdf = pypdf.PdfReader(file)
-        if verbose: print("Number of pages: {}".format(len(pdf.pages)))
-        text = ""
-        for page in pdf.pages: text += page.extract_text() + "\n"
-        if verbose: print("Text length: ~{} words".format(len(text.split(" "))))
-    return text
+class Model:
+    def __init__(self, name, max_tokens, temperature):
+        self.name = name
+        self.max_tokens = max_tokens
+        self.chunk_tokens_base = math.floor(self.max_tokens/3)
+        self.chunk_tokens_overlap = math.floor(self.chunk_tokens_base/10)
+        self.encoding = tiktoken.encoding_for_model(self.name)
+        self.temperature = temperature
+    def encode(self, text):
+        return self.encoding.encode(text)
+    def call(self, prompt):
+        prompt_tokens = self.encode(prompt)
+        max_tokens_response = self.max_tokens - len(prompt_tokens) - 10
+        response = openai.ChatCompletion.create(
+            model = self.name,
+            messages = [{"role":"user", "content":prompt}],
+            temperature = self.temperature,
+            max_tokens = max_tokens_response,
+        )
+        output = response.choices[0].message.content.strip()
+        return(output)
 
-# Split text into overlapping chunks by number of tokens
-def split_text_tokens(text, chunk_tokens_base, chunk_tokens_overlap, encoding, verbose=False):
-    # Convert text into tokens
-    tokens = encoding.encode(text)
-    if verbose: print("Number of tokens: {}".format(len(tokens)))
-    # Split tokens into chunks
-    chunk_starts = list(range(0, len(tokens), chunk_tokens_base))
-    chunk_ends = [chunk_start+chunk_tokens_base+chunk_tokens_overlap for chunk_start in chunk_starts]
-    # Ensure chunk ends do not exceed text length
-    chunk_ends[-1] = len(tokens)
-    # Split token list into chunks
-    chunks = [tokens[chunk_start:chunk_end] for chunk_start, chunk_end in zip(chunk_starts, chunk_ends)]
-    # Convert chunks back into text
-    chunks = [encoding.decode(chunk) for chunk in chunks]
-    if verbose: print("Number of chunks: {}".format(len(chunks)))
-    return(chunks)
+gpt_3_5_turbo = Model("gpt-3.5-turbo", 4096, 0.5)
+gpt_4 = Model("gpt-4", 8192, 0.5)
 
-# Split pdf text into overlapping chunks for GPT processing
-def split_text(text, chunk_size_base=1000, overlap=100, verbose=False):
-    # Split text and define chunk start and end indices
-    words = text.split(" ")
-    chunk_starts = list(range(0, len(words), chunk_size_base))
-    chunk_ends = [chunk_start+chunk_size_base+overlap for chunk_start in chunk_starts]
-    # Ensure chunk ends do not exceed text length
-    chunk_ends[-1] = len(words)
-    # Split text into chunks
-    chunks = [" ".join(words[chunk_start:chunk_end]) for chunk_start, chunk_end in zip(chunk_starts, chunk_ends)]
-    # Print info
-    if verbose:
-        print("Number of words: ~{}".format(len(words)))
-        print("Number of chunks: {}".format(len(chunks)))
-        print("Chunk lengths: {}".format([len(chunk) for chunk in chunks]))
-        print("Chunk start indices: {}".format(chunk_starts))
-        print("Chunk end indices: {}".format(chunk_ends))
-    return chunks
+#==============================================================================
+# Define text classes
+#==============================================================================
 
-# Generate a prompt for ChatGPT API text cleanup
-def generate_prompt(text, output_format):
-    prompt = "You are a research assistant tasked with accurately converting research papers from PDF to {output_format} format. You have been given the following text, which has been automatically extracted from a PDF file. Please clean up the text and convert it into {output_format} format. Make sure the result accurately and completely reflects the original text, without any errors, omissions, additions, or summarization. The text is as follows:\n\n{text}\n\nHTML:"
-    return prompt.format(text=text, output_format=output_format)
+chunk_clean_prompt = "You are a research assistant tasked with accurately converting research papers from PDF to {output_format} format. You have been given the following text, which has been automatically extracted from a PDF file. Please clean up the text and convert it into {output_format} format. Make sure the result accurately and completely reflects the original text, without any errors, omissions, additions, or summarization. The text is as follows:\n\n{text}\n\nHTML:"
 
-# Call OpenAI API for a chat completion and return the response
-def call_openai(prompt, model, max_tokens):
-    response = openai.ChatCompletion.create(
-        model = model,
-        messages = [{"role":"user", "content":prompt}],
-        temperature = 0.5,
-        max_tokens = max_tokens,
-    )
-    output = response.choices[0].message.content.strip()
-    return(output)
+# Define Chunk class for list of tokens
+class Chunk:
+    def __init__(self, tokens, model, verbose):
+        self.tokens = tokens
+        self.model = model
+        self.text = self.model.encoding.decode(self.tokens)
+        self.clean_prompt = chunk_clean_prompt.format(text=self.text, output_format="text")
+        self.verbose = verbose
+        self.cleaned = False
+    def clean(self, force=False):
+        if self.verbose: print("Tokens in prompt: {}".format(len(self.model.encode(self.clean_prompt))))
+        if force or not self.cleaned:
+            self.clean_text = self.model.call(self.clean_prompt)
+            self.clean_tokens = self.model.encoding.encode(self.clean_text)
+            self.cleaned = True
+        elif self.verbose: print("Chunk already cleaned.")
+        if self.verbose: print("Tokens in clean text: {}".format(len(self.clean_tokens)))
 
-# Clean a single chunk of PDF text with ChatGPT API
-def clean_chunk(chunk, model, encoding, max_tokens, verbose=False):
-    # Generate prompt & count tokens
-    prompt = generate_prompt(chunk, "text")
-    prompt_tokens = encoding.encode(prompt)
-    if verbose: print("Tokens in prompt: {}".format(len(prompt_tokens)))
-    max_tokens_response = max_tokens - len(prompt_tokens) - 10
-    # Call ChatGPT API
-    cleaned_text = call_openai(prompt, model, max_tokens_response)
-    cleaned_text_tokens = encoding.encode(cleaned_text)
-    if verbose: print("Tokens in cleaned text: {}".format(len(cleaned_text_tokens)))
-    return cleaned_text
+class PdfText:
+    def __init__(self, input_path, verbose):
+        self.verbose = verbose
+        self.input_path = input_path
+        self.pdf = pypdf.PdfReader(self.input_path)
+        if self.verbose: print("Number of pages: {}".format(len(self.pdf.pages)))
+        self.text_raw = "".join([page.extract_text()+"\n" for page in self.pdf.pages])
+    def set_model(self, model):
+        self.model = model
+        self.tokens_raw = model.encode(self.text_raw)
+        if self.verbose: print("Number of tokens: {}".format(len(self.tokens_raw)))
+    def split_raw(self):
+        # Define encoding
+        tokens = self.tokens_raw
+        # Define chunk indices
+        base = self.model.chunk_tokens_base
+        skip = base + self.model.chunk_tokens_overlap
+        chunk_starts = list(range(0, len(tokens), base))
+        chunk_ends = [chunk_start+skip for chunk_start in chunk_starts]
+        chunk_ends[-1] = len(tokens)
+        # Split token list into chunks
+        chunk_tokens = [tokens[chunk_start:chunk_end] for chunk_start, chunk_end in zip(chunk_starts, chunk_ends)]
+        self.chunks = [Chunk(chunk_token, self.model, self.verbose) for chunk_token in chunk_tokens]
+        if self.verbose: print("Number of chunks: {}".format(len(self.chunks)))
+    def clean(self, n_attempts = 10, force=False):
+        for attempt in range(n_attempts):
+            status = [chunk.cleaned for chunk in self.chunks]
+            if all(status): break
+            for chunk in self.chunks:
+                if self.verbose: print("Cleaning chunk {}/{}".format(self.chunks.index(chunk)+1, len(self.chunks)))
+                try:
+                    chunk.clean(force=force)
+                except:
+                    print("Chunk {} failed to clean.".format(self.chunks.index(chunk)+1))
+                    continue
+        if self.verbose:
+            status = [chunk.cleaned for chunk in self.chunks]
+            if all(status): print("All chunks cleaned successfully.")
+            else: print("Some chunks failed to clean.")
 
-# Clean a pre-split, multi-chunk PDF text with ChatGPT API
-def clean_chunks(chunks, model, encoding, max_tokens, verbose=False):
-    cleaned_chunks = []
-    f = partial(clean_chunk, model=model, encoding=encoding, max_tokens=max_tokens, verbose=verbose)
-    for n in range(len(chunks)):
-        print("Chunk {} of {}".format(n+1, len(chunks)))
-        cleaned_chunk = f(chunks[n])
-        cleaned_chunks.append(cleaned_chunk)
-    return cleaned_chunks
-    
 
 # Split chunk into overlapping and non-overlapping sections
 def split_chunk(chunk, overlap=100, expansion_factor = 1.5, chunk_start=False,
