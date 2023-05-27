@@ -217,10 +217,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process a PDF into cleaned HTML.')
     parser.add_argument('input_pdf', type=str, help='Input PDF file path')
     parser.add_argument('output_html', type=str, help='Output HTML file path')
-    # Argument to specify whether to use gpt4
     parser.add_argument('-4', '--gpt4', type=bool, help='Use GPT-4 model (default: gpt-3.5-turbo)', default=False)
     parser.add_argument('-m', '--max_attempts', type=int, help='Maximum number of attempts to clean and resolve text (default: 20)', default=20)
-    parser.add_argument('-v', '--verbose', type=bool, help='Verbose output (default: False)', default=False)
+    parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output (default: False)', default=False)
     args = parser.parse_args()
     # Define model
     model = gpt_4_small if args.gpt4 else gpt_3_5_turbo
