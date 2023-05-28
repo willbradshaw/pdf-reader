@@ -1,16 +1,21 @@
 #!/usr/bin/env python
 
-# Import libraries
+# Import libraries for OpenAI API and PDF processing
 import argparse
 import pypdf
-import requests
-import markdown
 import os
 import openai
-import sys
 import tiktoken
 import math
-from functools import partial
+
+# Import libraries for email
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google.oauth2.credentials import Credentials
+from email.mime.text import MIMEText
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+import base64, json
 
 # Set OpenAI API key
 openai.api_key = os.environ.get("OPENAI_API_KEY")
@@ -112,6 +117,7 @@ class PdfText:
         self.pdf = pypdf.PdfReader(self.input_path)
         if self.verbose: print("Number of pages: {}".format(len(self.pdf.pages)))
         self.text_raw = "".join([page.extract_text()+"\n" for page in self.pdf.pages])
+        self.title = self.pdf.metadata.title
     def set_model(self, model):
         self.model = model
         self.tokens_raw = model.encode(self.text_raw)
@@ -186,32 +192,107 @@ class PdfText:
         self.reconstructed_text = self.model.encoding.decode(self.reconstructed_tokens)
         if self.verbose: print("Tokens in reconstructed text: {}".format(len(self.reconstructed_tokens)))
 
+#==============================================================================
+# Define email sending class
+#==============================================================================
+
+class Messenger:
+    def __init__(self, config_file, token_path="gmail_token.json"):
+        # Import configuration information
+        with open(config_file, "r") as f:
+            self.config = json.load(f)
+        # Import and authenticate credentials
+        self.credentials = None
+        self.authenticated = False
+        self.authenticate(token_path)
+        # Set up for sending emails
+        self.sender = self.config["info"]["sender"]
+        self.receiver = self.config["info"]["receiver"]
+        self.service = build('gmail', 'v1', credentials=self.credentials)
+        ...
+    def authenticate(self, token_path):
+        assert self.config is not None
+        # The file token.json stores the user's access and refresh tokens, and is
+        # created automatically when the authorization flow completes for the first
+        # time.
+        if os.path.exists(token_path):
+            self.credentials = Credentials.from_authorized_user_file(token_path)
+        # If there are no (valid) credentials available, prompt the user to log in.
+        if not self.credentials or not self.credentials.valid:
+            if self.credentials and self.credentials.expired and self.credentials.refresh_token:
+                self.credentials.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_config(
+                    self.config, ['https://www.googleapis.com/auth/gmail.send'])
+                self.credentials = flow.run_local_server(port=0)
+            # Save the credentials for the next run
+            with open(token_path, 'w') as token:
+                token.write(self.credentials.to_json())
+        self.authenticated = True
+    def send(self, message_text, message_subject):
+        assert self.authenticated
+        # Create message
+        message = MIMEText(message_text, message_subject)
+        message["to"] = self.receiver
+        message["from"] = self.sender
+        message["subject"] = message_subject
+        missive = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode()}
+        # Send message
+        try:
+            message = (self.service.users().messages().send(userId="me", body=missive).execute())
+        except HttpError as error:
+            print("An error occurred: {}".format(error))
+
+#===============================================================================
+# Non-class functions
+#===============================================================================
+
+# Carry out text extraction and cleaning from a PDF text object
+def process_text(text, model, max_attempts):
+    # Set model and split into chunks
+    if text.verbose: print("Pre-processing text object...")
+    text.set_model(model)
+    text.split_raw()
+    if text.verbose: print("...done.\n")
+    # Clean text
+    if text.verbose: print("Cleaning text...")
+    text.clean(n_attempts=max_attempts, force=False)
+    if text.verbose: print("...done.\n")
+    # Resolve overlaps
+    if text.verbose: print("Resolving overlaps...")
+    text.resolve(n_attempts=max_attempts, force=False)
+    if text.verbose: print("...done.\n")
+    # Reconstruct text
+    if text.verbose: print("Reconstructing text...")
+    text.reconstruct()
+    if text.verbose: print("...done.\n")
+    return(text)
+
+# Export text to a text file
+def export_text(text, output_text):
+    if text.verbose: print("Exporting text...")
+    with open(output_text, "w") as f:
+        f.write(text.reconstructed_text)
+    if text.verbose: print("...done.\n")
+
+
 # Main function
 def main(input_pdf, output_text, model, max_attempts=10, verbose=True):
     # Import PDF file and define model
     print("Importing and pre-processing PDF file...")
     text = PdfText(input_pdf, verbose=verbose)
-    text.set_model(model)
-    text.split_raw()
-    print("...done.\n")
-    # Clean text
-    print("Cleaning text...")
-    text.clean(n_attempts=max_attempts, force=False)
-    print("...done.\n")
-    # Resolve overlaps
-    print("Resolving overlaps...")
-    text.resolve(n_attempts=max_attempts, force=False)
-    print("...done.\n")
-    # Reconstruct text
-    print("Reconstructing text...")
-    text.reconstruct()
-    print("...done.\n")
     # Export text
     print("Exporting text...")
     with open(output_text, "w") as f:
         f.write(text.reconstructed_text)
     print("...done.\n")
     return(text)
+
+def email_text(text, email_address, verbose=True):
+    # Define email parameters
+    port = 465  # For SSL
+    smtp_server = "smtp.gmail.com"
+    sender_email = "
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process a PDF into cleaned HTML.')
